@@ -87,7 +87,14 @@ pub(crate) async fn admin_create_or_modify_route(
 
 	match body.admin {
 		| Some(true) => services.admin.make_user_admin(user_id).await?,
-		| Some(false) => services.admin.revoke_admin(user_id).await?,
+		// Ketesa always sends admin:false for ordinary accounts. Revoking a user
+		// who was never in the admin room returns "was never an admin" and aborts
+		// the whole create, so only revoke when they actually are an admin.
+		| Some(false) => {
+			if services.admin.user_is_admin(user_id).await {
+				services.admin.revoke_admin(user_id).await?;
+			}
+		},
 		| None => {},
 	}
 
