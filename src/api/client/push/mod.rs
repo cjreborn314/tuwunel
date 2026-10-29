@@ -11,7 +11,10 @@ mod tests;
 
 use ruma::{
 	UserId,
-	events::{GlobalAccountDataEventType, push_rules::PushRulesEvent},
+	events::{
+		GlobalAccountDataEventType,
+		push_rules::{PushRulesEvent, PushRulesEventContent},
+	},
 	push::{
 		AnyPushRuleRef, NewPushRule, PredefinedContentRuleId, PredefinedOverrideRuleId, RuleKind,
 		Ruleset, SimplePushRule,
@@ -34,12 +37,30 @@ pub(crate) use self::{
 	pushrules_rule_enabled::{get_pushrule_enabled_route, set_pushrule_enabled_route},
 };
 
+/// Load the user's global push rules, recreating server defaults when missing.
+///
+/// Spec requires every account to have push rules. `GET /pushrules/` already
+/// recreates them, but mute/set/enable/delete went through this helper and
+/// returned `M_NOT_FOUND: PushRules event not found.` when account data was
+/// absent (common after some registrations). Recreate here so those routes
+/// match the GET behaviour.
 async fn load_push_rules(services: &Services, sender_user: &UserId) -> Result<PushRulesEvent> {
-	services
+	match services
 		.account_data
 		.get_global(sender_user, GlobalAccountDataEventType::PushRules)
 		.await
-		.map_err(|_| err!(Request(NotFound("PushRules event not found."))))
+	{
+		| Ok(event) => Ok(event),
+		| Err(_) => {
+			let event = PushRulesEvent {
+				content: PushRulesEventContent {
+					global: Ruleset::server_default(sender_user),
+				},
+			};
+			save_push_rules(services, sender_user, &event).await?;
+			Ok(event)
+		},
+	}
 }
 
 async fn save_push_rules(
