@@ -58,6 +58,9 @@ pub(crate) async fn admin_delete_room_v2_route(
 /// Runs the shutdown, purging storage when asked and recording the room as
 /// blocked by the requesting admin. `force_purge` is not mapped: tuwunel always
 /// evicts local users before purging.
+///
+/// Parent-space `m.space.child` links are cleared before the room lock is taken
+/// so parent locks do not nest under the child lock.
 async fn run_shutdown(
 	services: &crate::State,
 	room_id: &RoomId,
@@ -65,12 +68,17 @@ async fn run_shutdown(
 	block: bool,
 	purge: bool,
 ) -> Summary {
+	services
+		.delete
+		.unlink_from_parent_spaces(room_id, sender)
+		.await;
+
 	let state_lock = services.state.mutex.lock(room_id).await;
 
 	let summary = if purge {
 		services
 			.delete
-			.delete_room(room_id, false, state_lock)
+			.delete_room_as(room_id, false, None, state_lock)
 			.await
 			.unwrap_or_default()
 	} else {

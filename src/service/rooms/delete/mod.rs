@@ -1,9 +1,19 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use futures::{FutureExt, StreamExt};
-use ruma::{OwnedRoomAliasId, OwnedRoomId, OwnedUserId, RoomId};
+use ruma::{
+	OwnedRoomAliasId, OwnedRoomId, OwnedUserId, RoomId, UserId,
+	events::{StateEventType, space::child::SpaceChildEventContent},
+};
 use serde::{Deserialize, Serialize};
-use tuwunel_core::{Result, debug, result::LogErr, trace, utils::future::BoolExt, warn};
+use tuwunel_core::{
+	Result, debug, err, matrix::PduCount, pdu::PduBuilder, result::LogErr, trace,
+	utils::{
+		future::BoolExt,
+		stream::ReadyExt,
+	},
+	warn,
+};
 
 use crate::rooms::timeline::RoomMutexGuard;
 
@@ -74,9 +84,30 @@ impl Service {
 		force: bool,
 		state_lock: RoomMutexGuard,
 	) -> Result<ShutdownRoom> {
+		self.delete_room_as(room_id, force, None, state_lock)
+			.await
+	}
+
+	/// Same as [`Self::delete_room`], but when `deleter` is set, also tries to
+	/// clear `m.space.child` links from parent spaces before shutting the room
+	/// down (best-effort; failures are logged and ignored).
+	pub async fn delete_room_as(
+		&self,
+		room_id: &RoomId,
+		force: bool,
+		deleter: Option<&UserId>,
+		state_lock: RoomMutexGuard,
+	) -> Result<ShutdownRoom> {
+		if let Some(deleter) = deleter {
+			self.unlink_from_parent_spaces(room_id, deleter)
+				.await;
+		}
+
 		let summary = self.shutdown_room(room_id, &state_lock).await;
 
 		self.purge_room(room_id, force, &state_lock).await;
+
+		self.services.spaces.cache_evict(room_id);
 
 		debug!(?room_id, "Successfully deleted room from our database");
 
@@ -91,12 +122,29 @@ impl Service {
 		room_id: &RoomId,
 		state_lock: &RoomMutexGuard,
 	) -> ShutdownRoom {
-		debug!(?room_id, "Making all local users leave the room and forgetting it");
-		let (kicked_users, failed_to_kick_users) = self
+		debug!(?room_id, "Making all local users leave the room");
+
+		let joined = self
 			.services
 			.state_cache
 			.local_users_in_room(room_id)
 			.map(ToOwned::to_owned)
+			.collect::<Vec<_>>()
+			.await;
+
+		let invited = self
+			.services
+			.state_cache
+			.local_users_invited_to_room(room_id)
+			.map(ToOwned::to_owned)
+			.collect::<Vec<_>>()
+			.await;
+
+		let mut targets = HashSet::new();
+		targets.extend(joined);
+		targets.extend(invited);
+
+		let (kicked_users, failed_to_kick_users) = futures::stream::iter(targets)
 			.fold((Vec::new(), Vec::new()), async |(mut kicked, mut failed), user_id| {
 				match self
 					.services
@@ -104,7 +152,14 @@ impl Service {
 					.leave(&user_id, room_id, Some("Room Deleted".into()), true, state_lock)
 					.await
 				{
-					| Ok(()) => kicked.push(user_id),
+					| Ok(()) => {
+						// `forget_forced_upon_leave` clears left-state immediately. Restore it
+						// so clients still receive `rooms.leave` on the next /sync (including
+						// the synthetic leave path after the room is purged).
+						self.retain_leave_for_sync(&user_id, room_id)
+							.await;
+						kicked.push(user_id);
+					},
 					| Err(e) => {
 						warn!(%e, "Failed to leave room");
 						failed.push(user_id);
@@ -142,6 +197,187 @@ impl Service {
 			local_aliases,
 			new_room_id: None,
 		}
+	}
+
+	/// Keep a left-state row so /sync can notify the client the room went away,
+	/// even when `forget_forced_upon_leave` already wiped it.
+	async fn retain_leave_for_sync(&self, user_id: &UserId, room_id: &RoomId) {
+		if self
+			.services
+			.state_cache
+			.is_left(user_id, room_id)
+			.await
+		{
+			return;
+		}
+
+		let count = self.services.globals.next_count();
+		self.services
+			.state_cache
+			.mark_as_left(user_id, room_id, PduCount::Normal(*count));
+	}
+
+	/// Best-effort removal of this room from parent spaces' `m.space.child`
+	/// state. Call **before** locking `room_id` when possible so parent locks
+	/// do not nest under the child lock.
+	pub async fn unlink_from_parent_spaces(&self, room_id: &RoomId, deleter: &UserId) {
+		let parents = self
+			.find_parent_spaces(room_id)
+			.await;
+
+		if parents.is_empty() {
+			return;
+		}
+
+		debug!(
+			?room_id,
+			parents = parents.len(),
+			"Unlinking deleted room from parent spaces"
+		);
+
+		let server_user = self.services.globals.server_user.as_ref();
+		let actors: Vec<&UserId> = if deleter == server_user {
+			vec![deleter]
+		} else {
+			vec![deleter, server_user]
+		};
+
+		for parent_id in parents {
+			if parent_id == room_id {
+				continue;
+			}
+
+			let mut cleared = false;
+			for actor in &actors {
+				match self
+					.clear_space_child(&parent_id, room_id, actor)
+					.await
+				{
+					| Ok(()) => {
+						cleared = true;
+						break;
+					},
+					| Err(e) => {
+						trace!(
+							%e,
+							%parent_id,
+							%room_id,
+							actor = %actor,
+							"m.space.child clear attempt failed"
+						);
+					},
+				}
+			}
+
+			if !cleared {
+				warn!(
+					%parent_id,
+					%room_id,
+					"Could not clear m.space.child while deleting room"
+				);
+			}
+
+			self.services.spaces.cache_evict(&parent_id);
+		}
+	}
+
+	async fn find_parent_spaces(&self, room_id: &RoomId) -> Vec<OwnedRoomId> {
+		let mut parents = HashSet::new();
+
+		let from_parent_state: Vec<OwnedRoomId> = self
+			.services
+			.state_accessor
+			.room_state_keys(room_id, &StateEventType::SpaceParent)
+			.ready_filter_map(|key| OwnedRoomId::parse(key.as_str()).ok())
+			.collect()
+			.await;
+		parents.extend(from_parent_state);
+
+		let candidates: Vec<OwnedRoomId> = self
+			.services
+			.metadata
+			.iter_ids()
+			.map(ToOwned::to_owned)
+			.ready_filter(|candidate| candidate.as_ref() != room_id)
+			.collect()
+			.await;
+
+		for candidate in candidates {
+			if self
+				.services
+				.state_accessor
+				.room_state_get(&candidate, &StateEventType::SpaceChild, room_id.as_str())
+				.await
+				.is_ok()
+			{
+				parents.insert(candidate);
+			}
+		}
+
+		parents.into_iter().collect()
+	}
+
+	async fn clear_space_child(
+		&self,
+		parent_id: &RoomId,
+		child_id: &RoomId,
+		deleter: &UserId,
+	) -> Result {
+		let has_child = self
+			.services
+			.state_accessor
+			.room_state_get(parent_id, &StateEventType::SpaceChild, child_id.as_str())
+			.await
+			.is_ok();
+
+		if !has_child {
+			return Ok(());
+		}
+
+		if !self
+			.services
+			.state_cache
+			.is_joined(deleter, parent_id)
+			.await
+		{
+			return Err(err!(Request(Forbidden(
+				"Deleter is not joined to parent space; cannot clear m.space.child"
+			))));
+		}
+
+		let power_levels = self
+			.services
+			.state_accessor
+			.get_power_levels(parent_id)
+			.await
+			.log_err()
+			.ok();
+
+		let can_send = match power_levels {
+			| Some(pl) => pl.user_can_send_state(deleter, StateEventType::SpaceChild),
+			| None => true,
+		};
+
+		if !can_send {
+			return Err(err!(Request(Forbidden(
+				"Deleter lacks power to clear m.space.child in parent space"
+			))));
+		}
+
+		let state_lock = self.services.state.mutex.lock(parent_id).await;
+
+		// Empty `via` removes the child per the Matrix spaces spec.
+		self.services
+			.timeline
+			.build_and_append_pdu(
+				PduBuilder::state(child_id.to_owned(), &SpaceChildEventContent::new(Vec::new())),
+				deleter,
+				parent_id,
+				&state_lock,
+			)
+			.await?;
+
+		Ok(())
 	}
 
 	/// Wipes the room's storage. `force` widens the erasure of local users'
