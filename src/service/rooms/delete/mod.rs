@@ -10,7 +10,7 @@ use tuwunel_core::{
 	Result, debug, err, matrix::PduCount, pdu::PduBuilder, result::LogErr, trace,
 	utils::{
 		future::BoolExt,
-		stream::ReadyExt,
+		stream::{ReadyExt, TryReadyExt},
 	},
 	warn,
 };
@@ -288,7 +288,8 @@ impl Service {
 			.services
 			.state_accessor
 			.room_state_keys(room_id, &StateEventType::SpaceParent)
-			.ready_filter_map(|key| OwnedRoomId::parse(key.as_str()).ok())
+			.ready_and_then(|key| OwnedRoomId::parse(key.as_str()).map_err(Into::into))
+			.ready_filter_map(Result::ok)
 			.collect()
 			.await;
 		parents.extend(from_parent_state);
@@ -298,7 +299,7 @@ impl Service {
 			.metadata
 			.iter_ids()
 			.map(ToOwned::to_owned)
-			.ready_filter(|candidate| candidate.as_ref() != room_id)
+			.ready_filter(|candidate| candidate != room_id)
 			.collect()
 			.await;
 
@@ -370,7 +371,10 @@ impl Service {
 		self.services
 			.timeline
 			.build_and_append_pdu(
-				PduBuilder::state(child_id.to_owned(), &SpaceChildEventContent::new(Vec::new())),
+				PduBuilder::state(
+					child_id.to_string(),
+					&SpaceChildEventContent::new(Vec::new()),
+				),
 				deleter,
 				parent_id,
 				&state_lock,
