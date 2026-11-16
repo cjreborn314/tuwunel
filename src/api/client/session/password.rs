@@ -101,5 +101,14 @@ pub(super) async fn password_login(
 		.inspect_err(|e| debug_error!("{e}"))
 		.map_err(|_| err!(Request(Forbidden("Wrong username or password."))))?;
 
+	if hash::is_legacy_password_hash(&hash) {
+		services
+			.users
+			.set_password(user_id, Some(password))
+			.await
+			.inspect_err(|e| debug_error!("Failed to upgrade legacy password hash: {e}"))
+			.ok();
+	}
+
 	Ok(user_id.to_owned())
 }

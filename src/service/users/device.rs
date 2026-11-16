@@ -328,7 +328,10 @@ pub async fn set_refresh_token(
 	device_id: &DeviceId,
 	refresh_token: &str,
 ) -> Result {
-	debug_assert!(refresh_token.starts_with("refresh_"), "refresh_token missing prefix");
+	debug_assert!(
+		refresh_token.starts_with("refresh_") || refresh_token.starts_with("syr_"),
+		"refresh_token missing prefix"
+	);
 
 	let config = &self.services.server.config;
 	let ttl = config.refresh_token_ttl;

@@ -24,7 +24,8 @@ pub(crate) async fn refresh_token_route(
 ) -> Result<Response> {
 	let refresh_token_claim = body.body.refresh_token;
 
-	if !refresh_token_claim.starts_with("refresh_") {
+	// "syr_" tokens were issued by Synapse and carried over by an import.
+	if !refresh_token_claim.starts_with("refresh_") && !refresh_token_claim.starts_with("syr_") {
 		return Err!(Request(Forbidden("Refresh token is malformed.")));
 	}
 

@@ -13,6 +13,7 @@ mod force_join_room;
 mod force_leave_room;
 mod force_promote;
 mod get_room_tags;
+mod import_synapse;
 mod last_active;
 mod list_joined_rooms;
 mod list_users;
@@ -197,6 +198,17 @@ pub(super) enum UserCommand {
 	/// - Grant server-admin privileges to a user.
 	MakeUserAdmin {
 		user_id: String,
+	},
+
+	/// - Import accounts, devices, access tokens and E2EE key material from a
+	///   Synapse export so existing sessions stay logged in.
+	///
+	/// Only runs against a database with none of the exported users. Room
+	/// state and history are not imported. Run it with `--maintenance
+	/// --execute` so no client reaches the server before the import completes.
+	ImportSynapse {
+		/// Path to the JSON produced by `scripts/synapse-export.py`
+		path: String,
 	},
 
 	/// - Set a user profile key (display name, avatar url, etc) to a value

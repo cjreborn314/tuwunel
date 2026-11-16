@@ -423,15 +423,29 @@ impl Service {
 		Ok(())
 	}
 
+	/// Store an already-encoded password hash verbatim, e.g. one imported from
+	/// another homeserver. The hash must be verifiable by
+	/// [`utils::hash::verify_password`].
+	pub fn set_password_hash(&self, user_id: &UserId, password_hash: &str) {
+		self.db
+			.userid_password
+			.insert(user_id, password_hash);
+		self.db.userid_origin.insert(user_id, "password");
+	}
+
 	/// Creates a new sync filter. Returns the filter id.
 	#[must_use]
 	pub fn create_filter(&self, user_id: &UserId, filter: &FilterDefinition) -> String {
 		let filter_id = utils::random_string(4);
-
-		let key = (user_id, &filter_id);
-		self.db.userfilterid_filter.put(key, Json(filter));
+		self.put_filter(user_id, &filter_id, filter);
 
 		filter_id
+	}
+
+	/// Stores a sync filter under a caller-chosen id.
+	pub fn put_filter(&self, user_id: &UserId, filter_id: &str, filter: &FilterDefinition) {
+		let key = (user_id, filter_id);
+		self.db.userfilterid_filter.put(key, Json(filter));
 	}
 
 	pub async fn get_filter(

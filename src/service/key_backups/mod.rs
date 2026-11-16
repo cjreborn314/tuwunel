@@ -58,6 +58,31 @@ pub fn create_backup(
 	Ok(version_string)
 }
 
+/// Create a backup under a caller-chosen version, e.g. one imported from
+/// another homeserver. Versions must parse as integers to be found by
+/// [`Self::get_latest_backup_version`].
+#[implement(Service)]
+pub fn import_backup(
+	&self,
+	user_id: &UserId,
+	version: &str,
+	backup_metadata: &Raw<BackupAlgorithm>,
+) -> Result {
+	if version.parse::<u64>().is_err() {
+		return Err!(Request(InvalidParam("Backup version {version:?} is not an integer.")));
+	}
+
+	let count = self.services.globals.next_count();
+	let key = (user_id, version);
+	let mut txn = self.services.db.txn();
+
+	txn.put(&self.db.backupid_algorithm, key, Json(backup_metadata));
+	txn.put(&self.db.backupid_etag, key, *count);
+	txn.execute();
+
+	Ok(())
+}
+
 #[implement(Service)]
 pub async fn delete_backup(&self, user_id: &UserId, version: &str) {
 	let key = (user_id, version);
