@@ -18,6 +18,7 @@ mod last_active;
 mod list_joined_rooms;
 mod list_users;
 mod make_user_admin;
+mod purge_deactivated;
 mod put_room_tag;
 mod redact_event;
 mod reject_invites;
@@ -126,6 +127,17 @@ pub(super) enum UserCommand {
 		#[arg(short, long)]
 		/// Also deactivate admin accounts and will assume leave all rooms too
 		force: bool,
+	},
+
+	/// - Permanently delete deactivated local users
+	///
+	/// Removes the account, profile, account data, filters, key backups and
+	/// uploaded media so the user ID no longer exists. Users with devices or
+	/// any room membership history, admins and the server user are skipped.
+	/// Without --confirm only reports how many users would be purged.
+	PurgeDeactivated {
+		#[arg(long)]
+		confirm: bool,
 	},
 
 	/// - Show the MSC4025 erasure state of a local user

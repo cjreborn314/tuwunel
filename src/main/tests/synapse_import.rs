@@ -247,7 +247,47 @@ async fn exercise(services: &Services, export_path: &std::path::Path) -> Result 
 			.await
 			.is_err(),
 		"re-import refused",
+	)?;
+
+	let preview = admin_output(services, "users purge-deactivated").await?;
+	check(
+		preview.contains("1 deactivated users can be purged, 0 skipped"),
+		"purge preview",
+	)?;
+	check(services.users.exists(&bob).await, "preview keeps bob")?;
+
+	let purged = admin_output(services, "users purge-deactivated --confirm").await?;
+	check(purged.contains("Purged 1 deactivated users"), "purge output")?;
+	check(!services.users.exists(&bob).await, "bob purged")?;
+	check(
+		services
+			.account_data
+			.get_raw(None, &bob, "m.push_rules")
+			.await
+			.is_err(),
+		"bob push rules purged",
+	)?;
+	check(services.users.is_active(&alice).await, "alice kept")?;
+	services.users.get_filter(&alice, "1").await?;
+
+	check(
+		admin_output(services, "users purge-deactivated")
+			.await?
+			.contains("0 deactivated users can be purged"),
+		"purge is idempotent",
 	)
+}
+
+async fn admin_output(services: &Services, command: &str) -> Result<String> {
+	match services
+		.admin
+		.command_in_place(command.to_owned(), None)
+		.await
+	{
+		| Ok(Some(output)) => Ok(output.as_str().to_owned()),
+		| Ok(None) => Err!("{command} produced no output"),
+		| Err(output) => Err!("{command} failed: {}", output.as_str()),
+	}
 }
 
 fn check(ok: bool, what: &str) -> Result {

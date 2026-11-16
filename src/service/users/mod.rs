@@ -23,7 +23,7 @@ use tuwunel_core::{
 	trace,
 	utils::{self, BoolExt, ReadyExt, stream::TryIgnore},
 };
-use tuwunel_database::{Deserialized, Json, Map};
+use tuwunel_database::{Deserialized, Interfix, Json, Map};
 
 pub use self::{dehydrated_device::DehydratedDevice, keys::parse_master_key, register::Register};
 
@@ -181,6 +181,64 @@ impl Service {
 
 		// TODO: Unhook 3PID
 		Ok(())
+	}
+
+	/// Remove the account rows of a deactivated user so the user ID stops
+	/// existing. Profile, account data, media, backups and room state live in
+	/// other services; callers clear those first and must only pass users
+	/// that have no devices and have never been in a room.
+	pub async fn purge_account(&self, user_id: &UserId) {
+		for pointer in [
+			&self.db.userid_masterkeyid,
+			&self.db.userid_selfsigningkeyid,
+			&self.db.userid_usersigningkeyid,
+		] {
+			if let Ok(key_id) = pointer.get(user_id).await {
+				self.db.keyid_key.remove(&*key_id);
+			}
+		}
+
+		let prefix = (user_id, Interfix);
+		for map in [
+			&self.db.keychangeid_userid,
+			&self.db.todeviceid_events,
+			&self.db.userdeviceid_metadata,
+			&self.db.userdeviceid_token,
+			&self.db.userdeviceidtoken_index,
+			&self.db.userdeviceid_refresh,
+			&self.db.userdeviceid_spentrefresh,
+			&self.db.userdeviceidalgorithm_fallback,
+			&self.db.userfilterid_filter,
+		] {
+			map.keys_prefix_raw(&prefix)
+				.ignore_err()
+				.ready_for_each(|key| map.remove(key))
+				.await;
+		}
+
+		if let Some(otks) = &self.db.onetimekeyid4225_otk {
+			otks.keys_prefix_raw(&prefix)
+				.ignore_err()
+				.ready_for_each(|key| otks.remove(key))
+				.await;
+		}
+
+		for map in [
+			&self.db.oidccskeybypass_userid,
+			&self.db.userid_dehydrateddevice,
+			&self.db.userid_devicelistversion,
+			&self.db.userid_erased,
+			&self.db.userid_lastonetimekeyupdate,
+			&self.db.userid_locked,
+			&self.db.userid_masterkeyid,
+			&self.db.userid_selfsigningkeyid,
+			&self.db.userid_suspended,
+			&self.db.userid_usersigningkeyid,
+			&self.db.userid_origin,
+			&self.db.userid_password,
+		] {
+			map.remove(user_id);
+		}
 	}
 
 	/// Check if a user has an account on this homeserver.

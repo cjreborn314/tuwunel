@@ -101,6 +101,21 @@ pub async fn delete_backup(&self, user_id: &UserId, version: &str) {
 }
 
 #[implement(Service)]
+pub async fn delete_all_backups(&self, user_id: &UserId) {
+	let prefix = (user_id, Interfix);
+	for map in [
+		&self.db.backupid_algorithm,
+		&self.db.backupid_etag,
+		&self.db.backupkeyid_backup,
+	] {
+		map.keys_prefix_raw(&prefix)
+			.ignore_err()
+			.ready_for_each(|key| map.remove(key))
+			.await;
+	}
+}
+
+#[implement(Service)]
 pub async fn update_backup<'a>(
 	&self,
 	user_id: &UserId,
