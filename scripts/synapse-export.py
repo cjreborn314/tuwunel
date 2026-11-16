@@ -11,6 +11,9 @@ The JSON written to stdout contains access tokens and password hashes; keep it
 private and delete it after the import. Only counts are written to stderr.
 Media files are referenced relative to the export file as local_content/...;
 copy the media store's local_content directory next to export.json.
+
+Deactivated users and their media are left out so their IDs do not exist on
+Tuwunel; set EXPORT_DEACTIVATED=1 to export them as deactivated accounts.
 """
 
 import json
@@ -62,12 +65,17 @@ def main():
     connection.set_session(readonly=True)
     cursor = connection.cursor()
 
+    include_deactivated = os.environ.get("EXPORT_DEACTIVATED") == "1"
+    dropped = set()
     users = {}
     for row in rows(
         cursor,
         """SELECT name, password_hash, admin, deactivated, locked, suspended
            FROM users WHERE appservice_id IS NULL AND COALESCE(is_guest, 0) = 0""",
     ):
+        if row["deactivated"] and not include_deactivated:
+            dropped.add(row["name"])
+            continue
         users[row["name"]] = {
             "user_id": row["name"],
             "password_hash": row["password_hash"],
@@ -264,6 +272,8 @@ def main():
         """SELECT media_id, media_type, upload_name, user_id FROM local_media_repository
            WHERE quarantined_by IS NULL AND url_cache IS NULL""",
     ):
+        if row["user_id"] in dropped:
+            continue
         media_id = row["media_id"]
         relative = os.path.join("local_content", media_id[0:2], media_id[2:4], media_id[4:])
         if not os.path.isfile(os.path.join(media_store, relative)):
@@ -285,6 +295,7 @@ def main():
     counts = {
         "users": len(exported),
         "deactivated": sum(user["deactivated"] for user in exported),
+        "deactivated_dropped": len(dropped),
         "admins": sum(user["admin"] and not user["deactivated"] for user in exported),
         "devices": len(all_devices),
         "access_tokens": sum(len(device["access_tokens"]) for device in all_devices),
