@@ -31,7 +31,7 @@ pub const TOKEN_LENGTH: usize = 32;
 
 /// Adds a new device to a user.
 #[implement(super::Service)]
-#[tracing::instrument(level = "info", skip(self, access_token))]
+#[tracing::instrument(level = "info", skip(self, access_token, refresh_token))]
 pub async fn create_device(
 	&self,
 	user_id: &UserId,
